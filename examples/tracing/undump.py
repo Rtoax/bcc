@@ -3,7 +3,7 @@
 # 
 # undump        Dump UNIX socket packets.
 #               For Linux, uses BCC, eBPF. Embedded C.
-# USAGE: undump [-h] [-t] [-p PID]
+# USAGE: undump [-h] [-p PID]
 #
 # This uses dynamic tracing of kernel functions, and will need to be updated
 # to match kernel changes.
