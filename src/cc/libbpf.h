@@ -109,6 +109,8 @@ bool bpf_has_kernel_btf(void);
 
 int kernel_struct_has_field(const char *struct_name, const char *field_name);
 
+int kernel_enum_has_field(const char *enum_name, const char *field_name);
+
 void * bpf_open_perf_buffer(perf_reader_raw_cb raw_cb,
                             perf_reader_lost_cb lost_cb, void *cb_cookie,
                             int pid, int cpu, int page_cnt);

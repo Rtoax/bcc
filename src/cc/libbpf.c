@@ -1367,7 +1367,7 @@ bool bpf_has_kernel_btf(void)
   return true;
 }
 
-int kernel_struct_has_field(const char *struct_name, const char *field_name)
+static int kernel_record_has_field(const char *record_name, const char *field_name, int type)
 {
   const struct btf_type *btf_type;
   const struct btf_member *btf_member;
@@ -1379,7 +1379,7 @@ int kernel_struct_has_field(const char *struct_name, const char *field_name)
   if (ret)
     return -1;
 
-  btf_id = btf__find_by_name_kind(btf, struct_name, BTF_KIND_STRUCT);
+  btf_id = btf__find_by_name_kind(btf, record_name, type);
   if (btf_id < 0) {
     ret = -1;
     goto cleanup;
@@ -1398,6 +1398,16 @@ int kernel_struct_has_field(const char *struct_name, const char *field_name)
 cleanup:
   btf__free(btf);
   return ret;
+}
+
+int kernel_struct_has_field(const char *struct_name, const char *field_name)
+{
+  return kernel_record_has_field(struct_name, field_name, BTF_KIND_STRUCT);
+}
+
+int kernel_enum_has_field(const char *enum_name, const char *field_name)
+{
+  return kernel_record_has_field(enum_name, field_name, BTF_KIND_ENUM);
 }
 
 int bpf_attach_kfunc(int prog_fd)
