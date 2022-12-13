@@ -337,8 +337,9 @@ write by process
 USAGE message:
 
 # argdist -h
-usage: argdist [-h] [-p PID] [-z STRING_SIZE] [-i INTERVAL] [-n COUNT] [-v]
-               [-c] [-T TOP] [-H specifier] [-C[specifier] [-I header]
+usage: argdist.py [-h] [-p PID] [-t TID] [-z STRING_SIZE] [-i INTERVAL]
+                  [-d DURATION] [-n COUNT] [-v] [-c] [-T TOP] [-H specifier]
+                  [-C specifier] [-I header]
 
 Trace a function and display a summary of its parameter values.
 
@@ -351,11 +352,12 @@ optional arguments:
   -i INTERVAL, --interval INTERVAL
                         output interval, in seconds (default 1 second)
   -d DURATION, --duration DURATION
-			total duration of trace, in seconds
+                        total duration of trace, in seconds
   -n COUNT, --number COUNT
                         number of outputs
   -v, --verbose         print resulting BPF program code before executing
-  -c, --cumulative      do not clear histograms and freq counts at each interval
+  -c, --cumulative      do not clear histograms and freq counts at each
+                        interval
   -T TOP, --top TOP     number of top results to show (not applicable to
                         histograms)
   -H specifier, --histogram specifier
@@ -366,18 +368,20 @@ optional arguments:
                         below)
   -I header, --include header
                         additional header files to include in the BPF program
-                        as either full path, or relative to current working directory,
-                        or relative to default kernel header search path
+                        as either full path, or relative to relative to
+                        current working directory, or relative to default
+                        kernel header search path
 
 Probe specifier syntax:
-        {p,r,t,u}:{[library],category}:function(signature)[:type[,type...]:expr[,expr...][:filter]][#label]
+        {p,r,t,u}:{[library],category}:function(signature):type[,type...]:expr[,expr...][:filter]][#label]
 Where:
-        p,r,t,u    -- probe at function entry, function exit, kernel tracepoint,
-                      or USDT probe
+        p,r,t,u    -- probe at function entry, function exit, kernel
+                      tracepoint, or USDT probe
                       in exit probes: can use $retval, $entry(param), $latency
         library    -- the library that contains the function
                       (leave empty for kernel functions)
         category   -- the category of the kernel tracepoint (e.g. net, sched)
+        function   -- the function name to trace (or tracepoint name)
         signature  -- the function's parameters, as in the C header
         type       -- the type of the expression to collect (supports multiple)
         expr       -- the expression to collect (supports multiple)
@@ -393,13 +397,13 @@ argdist -p 1005 -C 'p:c:malloc(size_t size):size_t:size:size==16'
         Print a frequency count of how many times process 1005 called malloc
         with an allocation size of 16 bytes
 
-argdist -C 'r:c:gets():char*:$retval#snooped strings'
+argdist -C 'r:c:gets():char*:(char*)$retval#snooped strings'
         Snoop on all strings returned by gets()
 
 argdist -H 'r::__kmalloc(size_t size):u64:$latency/$entry(size)#ns per byte'
         Print a histogram of nanoseconds per byte from kmalloc allocations
 
-argdist -C 'p::__kmalloc(size_t size, gfp_t flags):size_t:size:flags&GFP_ATOMIC'
+argdist -C 'p::__kmalloc(size_t sz, gfp_t flags):size_t:sz:flags&GFP_ATOMIC'
         Print frequency count of kmalloc allocation sizes that have GFP_ATOMIC
 
 argdist -p 1005 -C 'p:c:write(int fd):int:fd' -T 5
@@ -408,12 +412,13 @@ argdist -p 1005 -C 'p:c:write(int fd):int:fd' -T 5
         the top 5 busiest fds
 
 argdist -p 1005 -H 'r:c:read()'
-        Print a histogram of error codes returned by read() in process 1005
+        Print a histogram of results (sizes) returned by read() in process 1005
 
 argdist -C 'r::__vfs_read():u32:$PID:$latency > 100000'
         Print frequency of reads by process where the latency was >0.1ms
 
-argdist -H 'r::__vfs_read(void *file, void *buf, size_t count):size_t:$entry(count):$latency > 1000000' 
+argdist -H 'r::__vfs_read(void *file, void *buf, size_t count):size_t:
+            $entry(count):$latency > 1000000'
         Print a histogram of read sizes that were longer than 1ms
 
 argdist -H \
@@ -423,7 +428,7 @@ argdist -H \
 
 argdist -C 'p:c:fork()#fork calls'
         Count fork() calls in libc across all processes
-        Can also use funccount.py, which is easier and more flexible 
+        Can also use funccount.py, which is easier and more flexible
 
 argdist -H 't:block:block_rq_complete():u32:args->nr_sector'
         Print histogram of number of sectors in completing block I/O requests
@@ -442,7 +447,7 @@ argdist -H 'p:c:sleep(u32 seconds):u32:seconds' \
 argdist -p 2780 -z 120 \
         -C 'p:c:write(int fd, char* buf, size_t len):char*:buf:fd==1'
         Spy on writes to STDOUT performed by process 2780, up to a string size
-        of 120 characters 
+        of 120 characters
 
 argdist -I 'kernel/sched/sched.h' \
         -C 'p::__account_cfs_rq_runtime(struct cfs_rq *cfs_rq):s64:cfs_rq->runtime_remaining'
@@ -450,12 +455,3 @@ argdist -I 'kernel/sched/sched.h' \
         in kernel/sched/sched.h which is in kernel source tree and not in kernel-devel
         package.  So this command needs to run at the kernel source tree root directory
         so that the added header file can be found by the compiler.
-
-argdist -C 'p::do_sys_open(int dfd, const char __user *filename, int flags,
-            umode_t mode):char*:filename:STRCMP("sample.txt", filename)'
-        Trace open of the file "sample.txt". It should be noted that 'filename'
-        passed to the do_sys_open is a char * user pointer. Hence parameter
-        'filename' should be tagged with __user for kprobes (const char __user
-        *filename).  This information distinguishes if the 'filename' should be
-        copied from userspace to the bpf stack or from kernel space to the bpf
-        stack.
