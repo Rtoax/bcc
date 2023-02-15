@@ -162,10 +162,19 @@ int main(int argc, char **argv)
 			goto cleanup;
 		}
 	}
+
+	/**
+	 * Both folio_account_dirtied() and account_page_dirtied() are static
+	 * functions and they may be gone during compilation.
+	 */
 	if (kprobe_exists("folio_account_dirtied")) {
 		bpf_program__set_autoload(obj->progs.kprobe_account_page_dirtied, false);
-	} else {
+	} else if (kprobe_exists("account_page_dirtied")) {
 		bpf_program__set_autoload(obj->progs.kprobe_folio_account_dirtied, false);
+	} else {
+		fprintf(stderr, "Failed to attaching folio_account_dirtied and"\
+						" account_page_dirtied: kprobe doesn't exist.\n");
+		goto cleanup;
 	}
 
 	/* It fallbacks to kprobes when kernel does not support fentry. */
