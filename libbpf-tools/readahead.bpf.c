@@ -34,8 +34,7 @@ int BPF_PROG(do_page_cache_ra)
 	return 0;
 }
 
-SEC("fexit/__page_cache_alloc")
-int BPF_PROG(page_cache_alloc_ret, gfp_t gfp, struct page *ret)
+static int __page_cache_alloc_ret(struct page *page)
 {
 	u32 pid = bpf_get_current_pid_tgid();
 	u64 ts;
@@ -44,11 +43,26 @@ int BPF_PROG(page_cache_alloc_ret, gfp_t gfp, struct page *ret)
 		return 0;
 
 	ts = bpf_ktime_get_ns();
-	bpf_map_update_elem(&birth, &ret, &ts, 0);
+	bpf_map_update_elem(&birth, &page, &ts, 0);
 	__sync_fetch_and_add(&hist.unused, 1);
 	__sync_fetch_and_add(&hist.total, 1);
 
 	return 0;
+}
+
+SEC("fexit/__page_cache_alloc")
+int BPF_PROG(page_cache_alloc_ret, gfp_t gfp, struct page *ret)
+{
+	return __page_cache_alloc_ret(ret);
+}
+
+SEC("fexit/filemap_alloc_folio")
+int BPF_PROG(filemap_alloc_folio_ret, gfp_t gfp, struct folio *ret)
+{
+#define nth_page(page,n) ((page) + (n))
+#define folio_page(folio, n)	nth_page(&(folio)->page, n)
+	struct page *page = folio_page(ret, 0);
+	return __page_cache_alloc_ret(page);
 }
 
 SEC("fexit/do_page_cache_ra")

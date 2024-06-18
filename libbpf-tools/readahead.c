@@ -80,6 +80,10 @@ static int readahead__set_attach_target(struct bpf_program *prog)
 {
 	int err;
 
+	err = bpf_program__set_attach_target(prog, 0, "page_cache_ra_order");
+	if (!err)
+		return 0;
+
 	err = bpf_program__set_attach_target(prog, 0, "do_page_cache_ra");
 	if (!err)
 		return 0;
