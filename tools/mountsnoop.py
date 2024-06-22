@@ -70,6 +70,12 @@ enum event_type {
     EVENT_MOUNT_TYPE,
     EVENT_MOUNT_DATA,
     EVENT_MOUNT_RET,
+    EVENT_FSOPEN,
+    EVENT_FSOPEN_FS_NAME,
+    EVENT_FSOPEN_RET,
+    EVENT_FSMOUNT,
+    EVENT_FSMOUNT_PARAMS,
+    EVENT_FSMOUNT_RET,
     EVENT_UMOUNT,
     EVENT_UMOUNT_TARGET,
     EVENT_UMOUNT_RET,
@@ -79,7 +85,7 @@ struct data_t {
     enum event_type type;
     pid_t pid, tgid;
     union {
-        /* EVENT_MOUNT, EVENT_UMOUNT */
+        /* EVENT_MOUNT, EVENT_UMOUNT, EVENT_FSOPEN, EVENT_FSMOUNT */
         struct {
             /* current->nsproxy->mnt_ns->ns.inum */
             unsigned int mnt_ns;
@@ -90,10 +96,18 @@ struct data_t {
         } enter;
         /*
          * EVENT_MOUNT_SOURCE, EVENT_MOUNT_TARGET, EVENT_MOUNT_TYPE,
-         * EVENT_MOUNT_DATA, EVENT_UMOUNT_TARGET
+         * EVENT_MOUNT_DATA, EVENT_UMOUNT_TARGET, EVENT_FSOPEN_FS_NAME
          */
         char str[MAX_STR_LEN];
-        /* EVENT_MOUNT_RET, EVENT_UMOUNT_RET */
+        /* EVENT_FSMOUNT_PARAMS */
+        struct {
+            int fs_fd;
+            int attr_flags;
+        } fsmount;
+        /*
+         * EVENT_MOUNT_RET, EVENT_UMOUNT_RET, EVENT_FSOPEN_RET,
+         * EVENT_FSMOUNT_RET
+         */
         int retval;
     };
 };
@@ -150,17 +164,100 @@ int syscall__mount(struct pt_regs *ctx, char __user *source,
     return 0;
 }
 
-int do_ret_sys_mount(struct pt_regs *ctx)
+int syscall__fsopen(struct pt_regs *ctx, char __user *fs_name,
+                    unsigned long flags)
+{
+    struct data_t event = {};
+    struct task_struct *task;
+    struct nsproxy *nsproxy;
+    struct mnt_namespace *mnt_ns;
+
+    if (container_should_be_filtered()) {
+        return 0;
+    }
+
+    event.pid = bpf_get_current_pid_tgid() & 0xffffffff;
+    event.tgid = bpf_get_current_pid_tgid() >> 32;
+
+    event.type = EVENT_FSOPEN;
+    bpf_get_current_comm(event.enter.comm, sizeof(event.enter.comm));
+    event.enter.flags = flags;
+    task = (struct task_struct *)bpf_get_current_task();
+    event.enter.ppid = task->real_parent->tgid;
+    bpf_probe_read_kernel_str(&event.enter.pcomm, TASK_COMM_LEN, task->real_parent->comm);
+    nsproxy = task->nsproxy;
+    mnt_ns = nsproxy->mnt_ns;
+    event.enter.mnt_ns = mnt_ns->ns.inum;
+    events.perf_submit(ctx, &event, sizeof(event));
+
+    event.type = EVENT_FSOPEN_FS_NAME;
+    __builtin_memset(event.str, 0, sizeof(event.str));
+    bpf_probe_read_user(event.str, sizeof(event.str), fs_name);
+    events.perf_submit(ctx, &event, sizeof(event));
+
+    return 0;
+}
+
+int syscall__fsmount(struct pt_regs *ctx, unsigned int fs_fd,
+                     unsigned int flags, unsigned int attr_flags)
+{
+    struct data_t event = {};
+    struct task_struct *task;
+    struct nsproxy *nsproxy;
+    struct mnt_namespace *mnt_ns;
+
+    if (container_should_be_filtered()) {
+        return 0;
+    }
+
+    event.pid = bpf_get_current_pid_tgid() & 0xffffffff;
+    event.tgid = bpf_get_current_pid_tgid() >> 32;
+
+    event.type = EVENT_FSMOUNT;
+    bpf_get_current_comm(event.enter.comm, sizeof(event.enter.comm));
+    event.enter.flags = flags;
+    task = (struct task_struct *)bpf_get_current_task();
+    event.enter.ppid = task->real_parent->tgid;
+    bpf_probe_read_kernel_str(&event.enter.pcomm, TASK_COMM_LEN, task->real_parent->comm);
+    nsproxy = task->nsproxy;
+    mnt_ns = nsproxy->mnt_ns;
+    event.enter.mnt_ns = mnt_ns->ns.inum;
+    events.perf_submit(ctx, &event, sizeof(event));
+
+    event.type = EVENT_FSMOUNT_PARAMS;
+    event.fsmount.fs_fd = fs_fd;
+    event.fsmount.attr_flags = attr_flags;
+    events.perf_submit(ctx, &event, sizeof(event));
+
+    return 0;
+}
+
+static int __do_ret_sys(struct pt_regs *ctx, int ret)
 {
     struct data_t event = {};
 
-    event.type = EVENT_MOUNT_RET;
+    event.type = ret;
     event.pid = bpf_get_current_pid_tgid() & 0xffffffff;
     event.tgid = bpf_get_current_pid_tgid() >> 32;
     event.retval = PT_REGS_RC(ctx);
     events.perf_submit(ctx, &event, sizeof(event));
 
     return 0;
+}
+
+int do_ret_sys_mount(struct pt_regs *ctx)
+{
+    return __do_ret_sys(ctx, EVENT_MOUNT_RET);
+}
+
+int do_ret_sys_fsopen(struct pt_regs *ctx)
+{
+    return __do_ret_sys(ctx, EVENT_FSOPEN_RET);
+}
+
+int do_ret_sys_fsmount(struct pt_regs *ctx)
+{
+    return __do_ret_sys(ctx, EVENT_FSMOUNT_RET);
 }
 
 int syscall__umount(struct pt_regs *ctx, char __user *target, int flags)
@@ -198,15 +295,7 @@ int syscall__umount(struct pt_regs *ctx, char __user *target, int flags)
 
 int do_ret_sys_umount(struct pt_regs *ctx)
 {
-    struct data_t event = {};
-
-    event.type = EVENT_UMOUNT_RET;
-    event.pid = bpf_get_current_pid_tgid() & 0xffffffff;
-    event.tgid = bpf_get_current_pid_tgid() >> 32;
-    event.retval = PT_REGS_RC(ctx);
-    events.perf_submit(ctx, &event, sizeof(event));
-
-    return 0;
+    return __do_ret_sys(ctx, EVENT_UMOUNT_RET);
 }
 """
 
@@ -241,6 +330,21 @@ MOUNT_FLAGS = [
     ('MS_ACTIVE', 1 << 30),
     ('MS_NOUSER', 1 << 31),
 ]
+
+MOUNT_ATTR_FLAGS = [
+    ('MOUNT_ATTR_RDONLY', 0x00000001),
+    ('MOUNT_ATTR_NOSUID', 0x00000002),
+    ('MOUNT_ATTR_NODEV', 0x00000004),
+    ('MOUNT_ATTR_NOEXEC', 0x00000008),
+    ('MOUNT_ATTR__ATIME', 0x00000070),
+    ('MOUNT_ATTR_RELATIME', 0x00000000),
+    ('MOUNT_ATTR_NOATIME', 0x00000010),
+    ('MOUNT_ATTR_STRICTATIME', 0x00000020),
+    ('MOUNT_ATTR_NODIRATIME', 0x00000080),
+    ('MOUNT_ATTR_IDMAP', 0x00100000),
+    ('MOUNT_ATTR_NOSYMFOLLOW', 0x00200000),
+]
+
 UMOUNT_FLAGS = [
     ('MNT_FORCE', 1),
     ('MNT_DETACH', 2),
@@ -260,9 +364,15 @@ class EventType(object):
     EVENT_MOUNT_TYPE = 3
     EVENT_MOUNT_DATA = 4
     EVENT_MOUNT_RET = 5
-    EVENT_UMOUNT = 6
-    EVENT_UMOUNT_TARGET = 7
-    EVENT_UMOUNT_RET = 8
+    EVENT_FSOPEN = 6
+    EVENT_FSOPEN_FS_NAME = 7
+    EVENT_FSOPEN_RET = 8
+    EVENT_FSMOUNT = 9
+    EVENT_FSMOUNT_PARAMS = 10
+    EVENT_FSMOUNT_RET = 11
+    EVENT_UMOUNT = 12
+    EVENT_UMOUNT_TARGET = 13
+    EVENT_UMOUNT_RET = 14
 
 
 class EnterData(ctypes.Structure):
@@ -274,11 +384,17 @@ class EnterData(ctypes.Structure):
         ('flags', ctypes.c_ulong),
     ]
 
+class FsmountParam(ctypes.Structure):
+    _fields_ = [
+        ('fs_fd', ctypes.c_uint),
+        ('attr_flags', ctypes.c_uint),
+    ]
 
 class DataUnion(ctypes.Union):
     _fields_ = [
         ('enter', EnterData),
         ('str', ctypes.c_char * MAX_STR_LEN),
+        ('fsmount', FsmountParam),
         ('retval', ctypes.c_int),
     ]
 
@@ -315,6 +431,10 @@ def decode_mount_flags(flags):
     str_flags.extend(_decode_flags(flags, MOUNT_FLAGS))
     return '|'.join(str_flags)
 
+def decode_mount_attr_flags(flags):
+    str_flags = []
+    str_flags.extend(_decode_flags(flags, MOUNT_ATTR_FLAGS))
+    return '|'.join(str_flags)
 
 def decode_umount_flags(flags):
     return decode_flags(flags, UMOUNT_FLAGS)
@@ -362,7 +482,9 @@ def print_event(mounts, umounts, parent, cpu, data, size):
     event = ctypes.cast(data, ctypes.POINTER(Event)).contents
 
     try:
-        if event.type == EventType.EVENT_MOUNT:
+        if (event.type == EventType.EVENT_MOUNT or
+            event.type == EventType.EVENT_FSOPEN or
+            event.type == EventType.EVENT_FSMOUNT):
             mounts[event.pid] = {
                 'pid': event.pid,
                 'tgid': event.tgid,
@@ -381,6 +503,11 @@ def print_event(mounts, umounts, parent, cpu, data, size):
         elif event.type == EventType.EVENT_MOUNT_DATA:
             # XXX: data is not always a NUL-terminated string
             mounts[event.pid]['data'] = event.union.str
+        elif event.type == EventType.EVENT_FSOPEN_FS_NAME:
+            mounts[event.pid]['fs_name'] = event.union.str
+        elif event.type == EventType.EVENT_FSMOUNT_PARAMS:
+            mounts[event.pid]['fs_fd'] = event.union.fsmount.fs_fd
+            mounts[event.pid]['attr_flags'] = event.union.fsmount.attr_flags
         elif event.type == EventType.EVENT_UMOUNT:
             umounts[event.pid] = {
                 'pid': event.pid,
@@ -394,7 +521,9 @@ def print_event(mounts, umounts, parent, cpu, data, size):
         elif event.type == EventType.EVENT_UMOUNT_TARGET:
             umounts[event.pid]['target'] = event.union.str
         elif (event.type == EventType.EVENT_MOUNT_RET or
-              event.type == EventType.EVENT_UMOUNT_RET):
+              event.type == EventType.EVENT_UMOUNT_RET or
+              event.type == EventType.EVENT_FSOPEN_RET or
+              event.type == EventType.EVENT_FSMOUNT_RET):
             if event.type == EventType.EVENT_MOUNT_RET:
                 syscall = mounts.pop(event.pid)
                 call = ('mount({source}, {target}, {type}, {flags}, {data}) ' +
@@ -405,11 +534,26 @@ def print_event(mounts, umounts, parent, cpu, data, size):
                     flags=decode_mount_flags(syscall['flags']),
                     data=decode_mount_string(syscall['data']),
                     retval=decode_errno(event.union.retval))
-            else:
+            elif event.type == EventType.EVENT_UMOUNT_RET:
                 syscall = umounts.pop(event.pid)
                 call = 'umount({target}, {flags}) = {retval}'.format(
                     target=decode_mount_string(syscall['target']),
                     flags=decode_umount_flags(syscall['flags']),
+                    retval=decode_errno(event.union.retval))
+            elif event.type == EventType.EVENT_FSOPEN_RET:
+                syscall = mounts.pop(event.pid)
+                call = ('fsopen({fs_name}, {flags}) ' +
+                        '= {retval}').format(
+                    fs_name=decode_mount_string(syscall['fs_name']),
+                    flags=decode_mount_flags(syscall['flags']),
+                    retval=decode_errno(event.union.retval))
+            elif event.type == EventType.EVENT_FSMOUNT_RET:
+                syscall = mounts.pop(event.pid)
+                call = ('fsmount({fs_fd}, {flags}, {attr_flags}) ' +
+                        '= {retval}').format(
+                    fs_fd=syscall['fs_fd'],
+                    flags=decode_mount_flags(syscall['flags']),
+                    attr_flags=decode_mount_attr_flags(syscall['attr_flags']),
                     retval=decode_errno(event.union.retval))
             if parent:
                 print('{:16} {:<7} {:<7} {:16} {:<7} {:<11} {}'.format(
@@ -449,8 +593,17 @@ def main():
         exit()
     b = bcc.BPF(text=bpf_text)
     mount_fnname = b.get_syscall_fnname("mount")
+    fsopen_fnname = b.get_syscall_fnname("fsopen")
+    fsconfig_fnname = b.get_syscall_fnname("fsconfig")
+    fsmount_fnname = b.get_syscall_fnname("fsmount")
+    move_mount_fnname = b.get_syscall_fnname("move_mount")
+    print("%s %s %s %s" % (fsopen_fnname, fsconfig_fnname, fsmount_fnname, move_mount_fnname))
     b.attach_kprobe(event=mount_fnname, fn_name="syscall__mount")
     b.attach_kretprobe(event=mount_fnname, fn_name="do_ret_sys_mount")
+    b.attach_kprobe(event=fsopen_fnname, fn_name="syscall__fsopen")
+    b.attach_kretprobe(event=fsopen_fnname, fn_name="do_ret_sys_fsopen")
+    b.attach_kprobe(event=fsmount_fnname, fn_name="syscall__fsmount")
+    b.attach_kretprobe(event=fsmount_fnname, fn_name="do_ret_sys_fsmount")
     umount_fnname = b.get_syscall_fnname("umount")
     b.attach_kprobe(event=umount_fnname, fn_name="syscall__umount")
     b.attach_kretprobe(event=umount_fnname, fn_name="do_ret_sys_umount")
