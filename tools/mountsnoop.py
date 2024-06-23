@@ -274,6 +274,10 @@ int syscall__fsconfig(struct pt_regs *ctx, int fd, unsigned int cmd,
     event.type = EVENT_FSCONFIG_PARAMS;
     event.fsconfig.fd = fd;
     event.fsconfig.cmd = cmd;
+    /*
+     * FIXME: fsconfig.key, fsconfig.value and fsconfig.aux can be used in
+     * different combinations, and perhaps we should distinguish between them.
+     */
     __builtin_memset(event.fsconfig.key, 0, sizeof(event.fsconfig.key));
     bpf_probe_read_user(event.fsconfig.key, sizeof(event.fsconfig.key), key);
     __builtin_memset(event.fsconfig.value, 0, sizeof(event.fsconfig.value));
@@ -402,6 +406,18 @@ MOUNT_ATTR_FLAGS = [
     ('MOUNT_ATTR_NOSYMFOLLOW', 0x00200000),
 ]
 
+FSCONFIG_CMD = [
+    ('FSCONFIG_SET_FLAG', 0),
+    ('FSCONFIG_SET_STRING', 1),
+    ('FSCONFIG_SET_BINARY', 2),
+    ('FSCONFIG_SET_PATH', 3),
+    ('FSCONFIG_SET_PATH_EMPTY', 4),
+    ('FSCONFIG_SET_FD', 5),
+    ('FSCONFIG_CMD_CREATE', 6),
+    ('FSCONFIG_CMD_RECONFIGURE', 7),
+    ('FSCONFIG_CMD_CREATE_EXCL', 8),
+]
+
 UMOUNT_FLAGS = [
     ('MNT_FORCE', 1),
     ('MNT_DETACH', 2),
@@ -488,6 +504,12 @@ def _decode_flags(flags, flag_list):
         str_flags.append('0x{:x}'.format(flags))
     return str_flags
 
+def _decode_cmd(cmd, cmd_list):
+    for str_cmd, cmd_val in cmd_list:
+        if cmd == cmd_val:
+            return str_cmd
+    return '0x{:x}'.format(cmd)
+
 
 def decode_flags(flags, flag_list):
     return '|'.join(_decode_flags(flags, flag_list))
@@ -505,6 +527,9 @@ def decode_mount_attr_flags(flags):
     str_flags = []
     str_flags.extend(_decode_flags(flags, MOUNT_ATTR_FLAGS))
     return '|'.join(str_flags)
+
+def decode_fsconfig_cmd(cmd):
+    return _decode_cmd(cmd, FSCONFIG_CMD)
 
 def decode_umount_flags(flags):
     return decode_flags(flags, UMOUNT_FLAGS)
@@ -638,7 +663,7 @@ def print_event(mounts, umounts, parent, cpu, data, size):
                 call = ('fsconfig({fd}, {cmd}, {key}, {value}, {aux}) ' +
                         '= {retval}').format(
                     fd=syscall['fd'],
-                    cmd=syscall['cmd'],
+                    cmd=decode_fsconfig_cmd(syscall['cmd']),
                     key=decode_mount_string(syscall['key']),
                     value=decode_mount_string(syscall['value']),
                     aux=syscall['aux'],
