@@ -338,6 +338,7 @@ int syscall__move_mount(struct pt_regs *ctx,
                      sizeof(event.move_mount.to_pathname));
     bpf_probe_read_user(event.move_mount.to_pathname,
                         sizeof(event.move_mount.to_pathname), to_pathname);
+    event.move_mount.flags = flags;
     events.perf_submit(ctx, &event, sizeof(event));
 
     return 0;
@@ -478,6 +479,17 @@ FSCONFIG_CMD = [
     ('FSCONFIG_CMD_CREATE_EXCL', 8),
 ]
 
+MOVE_MOUNT_FLAGS = [
+    ('MOVE_MOUNT_F_SYMLINKS', 0x00000001),
+    ('MOVE_MOUNT_F_AUTOMOUNTS', 0x00000002),
+    ('MOVE_MOUNT_F_EMPTY_PATH', 0x00000004),
+    ('MOVE_MOUNT_T_SYMLINKS', 0x00000010),
+    ('MOVE_MOUNT_T_AUTOMOUNTS', 0x00000020),
+    ('MOVE_MOUNT_T_EMPTY_PATH', 0x00000040),
+    ('MOVE_MOUNT_SET_GROUP', 0x00000100),
+    ('MOVE_MOUNT_BENEATH', 0x00000200),
+]
+
 UMOUNT_FLAGS = [
     ('MNT_FORCE', 1),
     ('MNT_DETACH', 2),
@@ -603,6 +615,11 @@ def decode_mount_attr_flags(flags):
 
 def decode_fsconfig_cmd(cmd):
     return _decode_cmd(cmd, FSCONFIG_CMD)
+
+def decode_move_mount_flags(flags):
+    str_flags = []
+    str_flags.extend(_decode_flags(flags, MOVE_MOUNT_FLAGS))
+    return '|'.join(str_flags)
 
 def decode_umount_flags(flags):
     return decode_flags(flags, UMOUNT_FLAGS)
@@ -757,7 +774,7 @@ def print_event(mounts, umounts, parent, cpu, data, size):
                     from_pathname=decode_mount_string(syscall['from_pathname']),
                     to_dfd=syscall['to_dfd'],
                     to_pathname=decode_mount_string(syscall['to_pathname']),
-                    flags=decode_mount_flags(syscall['flags']),
+                    flags=decode_move_mount_flags(syscall['flags']),
                     retval=decode_errno(event.union.retval))
             if parent:
                 print('{:16} {:<7} {:<7} {:16} {:<7} {:<11} {}'.format(
