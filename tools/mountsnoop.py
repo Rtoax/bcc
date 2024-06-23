@@ -9,6 +9,8 @@
 # Licensed under the Apache License, Version 2.0 (the "License")
 #
 # 14-Oct-2016   Omar Sandoval   Created this.
+# 23-Jun-2024   Rong Tao        Add fsopen(2),fsconfig(2),fsmount(2),
+#                               move_mount(2) syscalls support
 
 from __future__ import print_function
 import argparse
@@ -812,26 +814,52 @@ def main():
     if args.ebpf:
         print(bpf_text)
         exit()
+
     b = bcc.BPF(text=bpf_text)
+
     mount_fnname = b.get_syscall_fnname("mount")
+    # fsopne(2) syscall add since kernel commit 24dcb3d90a1f ("vfs: syscall:
+    # Add fsopen() to prepare for superblock creation") v5.1-rc1-5-g24dcb3d90a1f
     fsopen_fnname = b.get_syscall_fnname("fsopen")
+    # fsconfig(2) syscall add since kernel commit ecdab150fddb ("vfs: syscall:
+    # Add fsconfig() for configuring and managing a context") v5.1-rc1-7-gecdab150fddb
     fsconfig_fnname = b.get_syscall_fnname("fsconfig")
+    # fsmount(2) syscall add since kernel commit 93766fbd2696 ("vfs: syscall:
+    # Add fsmount() to create a mount for a superblock") v5.1-rc1-8-g93766fbd2696
     fsmount_fnname = b.get_syscall_fnname("fsmount")
+    # move_mount(2) syscall add since kernel commit 2db154b3ea8 ("vfs: syscall:
+    # Add move_mount(2) to move mounts around"), v5.1-rc1-2-g2db154b3ea8e
     move_mount_fnname = b.get_syscall_fnname("move_mount")
-    print("%s %s %s %s" % (fsopen_fnname, fsconfig_fnname, fsmount_fnname, move_mount_fnname))
+    umount_fnname = b.get_syscall_fnname("umount")
+
+    if b.ksymname(fsopen_fnname) == -1:
+        fsopen_fnname = None
+    if b.ksymname(fsconfig_fnname) == -1:
+        fsconfig_fnname = None
+    if b.ksymname(fsmount_fnname) == -1:
+        fsmount_fnname = None
+    if b.ksymname(move_mount_fnname) == -1:
+        move_mount_fnname = None
+
     b.attach_kprobe(event=mount_fnname, fn_name="syscall__mount")
     b.attach_kretprobe(event=mount_fnname, fn_name="do_ret_sys_mount")
-    b.attach_kprobe(event=fsopen_fnname, fn_name="syscall__fsopen")
-    b.attach_kretprobe(event=fsopen_fnname, fn_name="do_ret_sys_fsopen")
-    b.attach_kprobe(event=fsmount_fnname, fn_name="syscall__fsmount")
-    b.attach_kretprobe(event=fsmount_fnname, fn_name="do_ret_sys_fsmount")
-    b.attach_kprobe(event=fsconfig_fnname, fn_name="syscall__fsconfig")
-    b.attach_kretprobe(event=fsconfig_fnname, fn_name="do_ret_sys_fsconfig")
-    b.attach_kprobe(event=move_mount_fnname, fn_name="syscall__move_mount")
-    b.attach_kretprobe(event=move_mount_fnname, fn_name="do_ret_sys_move_mount")
-    umount_fnname = b.get_syscall_fnname("umount")
+
+    if fsopen_fnname:
+        b.attach_kprobe(event=fsopen_fnname, fn_name="syscall__fsopen")
+        b.attach_kretprobe(event=fsopen_fnname, fn_name="do_ret_sys_fsopen")
+    if fsmount_fnname:
+        b.attach_kprobe(event=fsmount_fnname, fn_name="syscall__fsmount")
+        b.attach_kretprobe(event=fsmount_fnname, fn_name="do_ret_sys_fsmount")
+    if fsconfig_fnname:
+        b.attach_kprobe(event=fsconfig_fnname, fn_name="syscall__fsconfig")
+        b.attach_kretprobe(event=fsconfig_fnname, fn_name="do_ret_sys_fsconfig")
+    if move_mount_fnname:
+        b.attach_kprobe(event=move_mount_fnname, fn_name="syscall__move_mount")
+        b.attach_kretprobe(event=move_mount_fnname, fn_name="do_ret_sys_move_mount")
+
     b.attach_kprobe(event=umount_fnname, fn_name="syscall__umount")
     b.attach_kretprobe(event=umount_fnname, fn_name="do_ret_sys_umount")
+
     b['events'].open_perf_buffer(
         functools.partial(print_event, mounts, umounts, args.parent_process))
 
