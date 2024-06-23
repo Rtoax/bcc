@@ -79,6 +79,9 @@ enum event_type {
     EVENT_FSCONFIG,
     EVENT_FSCONFIG_PARAMS,
     EVENT_FSCONFIG_RET,
+    EVENT_MOVE_MOUNT,
+    EVENT_MOVE_MOUNT_PARAMS,
+    EVENT_MOVE_MOUNT_RET,
     EVENT_UMOUNT,
     EVENT_UMOUNT_TARGET,
     EVENT_UMOUNT_RET,
@@ -90,7 +93,7 @@ struct data_t {
     union {
         /*
          * EVENT_MOUNT, EVENT_UMOUNT, EVENT_FSOPEN, EVENT_FSMOUNT,
-         * EVENT_FSCONFIG
+         * EVENT_FSCONFIG, EVENT_MOVE_MOUNT
          */
         struct {
             /* current->nsproxy->mnt_ns->ns.inum */
@@ -118,9 +121,17 @@ struct data_t {
             char value[32];
             int aux;
         } fsconfig;
+        /* EVENT_MOVE_MOUNT_PARAMS */
+        struct {
+            int from_dfd;
+            char from_pathname[128];
+            int to_dfd;
+            char to_pathname[128];
+            unsigned int flags;
+        } move_mount;
         /*
          * EVENT_MOUNT_RET, EVENT_UMOUNT_RET, EVENT_FSOPEN_RET,
-         * EVENT_FSMOUNT_RET, EVENT_FSCONFIG_RET
+         * EVENT_FSMOUNT_RET, EVENT_FSCONFIG_RET, EVENT_MOVE_MOUNT_RET
          */
         int retval;
     };
@@ -288,6 +299,50 @@ int syscall__fsconfig(struct pt_regs *ctx, int fd, unsigned int cmd,
     return 0;
 }
 
+int syscall__move_mount(struct pt_regs *ctx,
+                        int from_dfd, char *from_pathname,
+                        int to_dfd, char *to_pathname,
+                        unsigned int flags)
+{
+    struct data_t event = {};
+    struct task_struct *task;
+    struct nsproxy *nsproxy;
+    struct mnt_namespace *mnt_ns;
+
+    if (container_should_be_filtered()) {
+        return 0;
+    }
+
+    event.pid = bpf_get_current_pid_tgid() & 0xffffffff;
+    event.tgid = bpf_get_current_pid_tgid() >> 32;
+
+    event.type = EVENT_MOVE_MOUNT;
+    bpf_get_current_comm(event.enter.comm, sizeof(event.enter.comm));
+    event.enter.flags = flags;
+    task = (struct task_struct *)bpf_get_current_task();
+    event.enter.ppid = task->real_parent->tgid;
+    bpf_probe_read_kernel_str(&event.enter.pcomm, TASK_COMM_LEN, task->real_parent->comm);
+    nsproxy = task->nsproxy;
+    mnt_ns = nsproxy->mnt_ns;
+    event.enter.mnt_ns = mnt_ns->ns.inum;
+    events.perf_submit(ctx, &event, sizeof(event));
+
+    event.type = EVENT_MOVE_MOUNT_PARAMS;
+    event.move_mount.from_dfd = from_dfd;
+    __builtin_memset(event.move_mount.from_pathname, 0,
+                     sizeof(event.move_mount.from_pathname));
+    bpf_probe_read_user(event.move_mount.from_pathname,
+                        sizeof(event.move_mount.from_pathname), from_pathname);
+    event.move_mount.to_dfd = to_dfd;
+    __builtin_memset(event.move_mount.to_pathname, 0,
+                     sizeof(event.move_mount.to_pathname));
+    bpf_probe_read_user(event.move_mount.to_pathname,
+                        sizeof(event.move_mount.to_pathname), to_pathname);
+    events.perf_submit(ctx, &event, sizeof(event));
+
+    return 0;
+}
+
 static int __do_ret_sys(struct pt_regs *ctx, int ret)
 {
     struct data_t event = {};
@@ -319,6 +374,11 @@ int do_ret_sys_fsmount(struct pt_regs *ctx)
 int do_ret_sys_fsconfig(struct pt_regs *ctx)
 {
     return __do_ret_sys(ctx, EVENT_FSCONFIG_RET);
+}
+
+int do_ret_sys_move_mount(struct pt_regs *ctx)
+{
+    return __do_ret_sys(ctx, EVENT_MOVE_MOUNT_RET);
 }
 
 int syscall__umount(struct pt_regs *ctx, char __user *target, int flags)
@@ -446,9 +506,12 @@ class EventType(object):
     EVENT_FSCONFIG = 12
     EVENT_FSCONFIG_PARAMS = 13
     EVENT_FSCONFIG_RET = 14
-    EVENT_UMOUNT = 15
-    EVENT_UMOUNT_TARGET = 16
-    EVENT_UMOUNT_RET = 17
+    EVENT_MOVE_MOUNT = 15
+    EVENT_MOVE_MOUNT_PARAMS = 16
+    EVENT_MOVE_MOUNT_RET = 17
+    EVENT_UMOUNT = 18
+    EVENT_UMOUNT_TARGET = 19
+    EVENT_UMOUNT_RET = 20
 
 
 class EnterData(ctypes.Structure):
@@ -475,12 +538,22 @@ class FsconfigParam(ctypes.Structure):
         ('aux', ctypes.c_uint),
     ]
 
+class MoveMountParam(ctypes.Structure):
+    _fields_ = [
+        ('from_dfd', ctypes.c_uint),
+        ('from_pathname', ctypes.c_char * 128),
+        ('to_dfd', ctypes.c_uint),
+        ('to_pathname', ctypes.c_char * 128),
+        ('flags', ctypes.c_uint),
+    ]
+
 class DataUnion(ctypes.Union):
     _fields_ = [
         ('enter', EnterData),
         ('str', ctypes.c_char * MAX_STR_LEN),
         ('fsmount', FsmountParam),
         ('fsconfig', FsconfigParam),
+        ('move_mount', MoveMountParam),
         ('retval', ctypes.c_int),
     ]
 
@@ -580,7 +653,8 @@ def print_event(mounts, umounts, parent, cpu, data, size):
         if (event.type == EventType.EVENT_MOUNT or
             event.type == EventType.EVENT_FSOPEN or
             event.type == EventType.EVENT_FSMOUNT or
-            event.type == EventType.EVENT_FSCONFIG):
+            event.type == EventType.EVENT_FSCONFIG or
+            event.type == EventType.EVENT_MOVE_MOUNT):
             mounts[event.pid] = {
                 'pid': event.pid,
                 'tgid': event.tgid,
@@ -610,6 +684,12 @@ def print_event(mounts, umounts, parent, cpu, data, size):
             mounts[event.pid]['key'] = event.union.fsconfig.key
             mounts[event.pid]['value'] = event.union.fsconfig.value
             mounts[event.pid]['aux'] = event.union.fsconfig.aux
+        elif event.type == EventType.EVENT_MOVE_MOUNT_PARAMS:
+            mounts[event.pid]['from_dfd'] = event.union.move_mount.from_dfd
+            mounts[event.pid]['from_pathname'] = event.union.move_mount.from_pathname
+            mounts[event.pid]['to_dfd'] = event.union.move_mount.to_dfd
+            mounts[event.pid]['to_pathname'] = event.union.move_mount.to_pathname
+            mounts[event.pid]['flags'] = event.union.move_mount.flags
         elif event.type == EventType.EVENT_UMOUNT:
             umounts[event.pid] = {
                 'pid': event.pid,
@@ -626,7 +706,8 @@ def print_event(mounts, umounts, parent, cpu, data, size):
               event.type == EventType.EVENT_UMOUNT_RET or
               event.type == EventType.EVENT_FSOPEN_RET or
               event.type == EventType.EVENT_FSMOUNT_RET or
-              event.type == EventType.EVENT_FSCONFIG_RET):
+              event.type == EventType.EVENT_FSCONFIG_RET or
+              event.type == EventType.EVENT_MOVE_MOUNT_RET):
             if event.type == EventType.EVENT_MOUNT_RET:
                 syscall = mounts.pop(event.pid)
                 call = ('mount({source}, {target}, {type}, {flags}, {data}) ' +
@@ -667,6 +748,16 @@ def print_event(mounts, umounts, parent, cpu, data, size):
                     key=decode_mount_string(syscall['key']),
                     value=decode_mount_string(syscall['value']),
                     aux=syscall['aux'],
+                    retval=decode_errno(event.union.retval))
+            elif event.type == EventType.EVENT_MOVE_MOUNT_RET:
+                syscall = mounts.pop(event.pid)
+                call = ('move_mount({from_dfd}, {from_pathname}, {to_dfd}, {to_pathname}, {flags}) ' +
+                        '= {retval}').format(
+                    from_dfd=syscall['from_dfd'],
+                    from_pathname=decode_mount_string(syscall['from_pathname']),
+                    to_dfd=syscall['to_dfd'],
+                    to_pathname=decode_mount_string(syscall['to_pathname']),
+                    flags=decode_mount_flags(syscall['flags']),
                     retval=decode_errno(event.union.retval))
             if parent:
                 print('{:16} {:<7} {:<7} {:16} {:<7} {:<11} {}'.format(
@@ -719,6 +810,8 @@ def main():
     b.attach_kretprobe(event=fsmount_fnname, fn_name="do_ret_sys_fsmount")
     b.attach_kprobe(event=fsconfig_fnname, fn_name="syscall__fsconfig")
     b.attach_kretprobe(event=fsconfig_fnname, fn_name="do_ret_sys_fsconfig")
+    b.attach_kprobe(event=move_mount_fnname, fn_name="syscall__move_mount")
+    b.attach_kretprobe(event=move_mount_fnname, fn_name="do_ret_sys_move_mount")
     umount_fnname = b.get_syscall_fnname("umount")
     b.attach_kprobe(event=umount_fnname, fn_name="syscall__umount")
     b.attach_kretprobe(event=umount_fnname, fn_name="do_ret_sys_umount")
