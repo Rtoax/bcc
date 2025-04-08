@@ -23,17 +23,35 @@ struct {
 	__uint(value_size, sizeof(__u32));
 } events SEC(".maps");
 
-static __always_inline bool is_target_signal(int sig) {
-  if (target_signals == 0)
-    return true;
+static __always_inline bool is_target_signal(int sig)
+{
+	if (target_signals == 0)
+		return true;
 
-  if ((target_signals & (1 << (sig - 1))) == 0)
-    return false;
+	if ((target_signals & (1 << (sig - 1))) == 0)
+		return false;
 
-  return true;
+	return true;
 }
 
-static int probe_entry(pid_t tpid, int sig)
+static __always_inline void get_tcomm_dummy(pid_t tpid, char *tcomm, __u32 size)
+{
+	tcomm[0] = 'N';
+	tcomm[1] = '/';
+	tcomm[2] = 'A';
+	tcomm[3] = '\0';
+}
+
+static __always_inline void get_tcomm(pid_t tpid, char *tcomm, __u32 size)
+{
+	struct task_struct *ttask = bpf_task_from_pid(tpid);
+	if (ttask) {
+		bpf_probe_read_kernel(tcomm, size, ttask->comm);
+		bpf_task_release(ttask);
+	}
+}
+
+static int probe_entry(pid_t tpid, int sig, void (*tcomm_fn)(pid_t, char*, __u32))
 {
 	struct event event = {};
 	__u64 pid_tgid;
@@ -47,6 +65,8 @@ static int probe_entry(pid_t tpid, int sig)
 	tid = (__u32)pid_tgid;
 	if (filtered_pid && pid != filtered_pid)
 		return 0;
+
+	tcomm_fn(tpid, event.tcomm, sizeof(event.tcomm));
 
 	event.pid = pid;
 	event.tpid = tpid;
@@ -83,7 +103,16 @@ int kill_entry(struct syscall_trace_enter *ctx)
 	pid_t tpid = (pid_t)ctx->args[0];
 	int sig = (int)ctx->args[1];
 
-	return probe_entry(tpid, sig);
+	return probe_entry(tpid, sig, get_tcomm_dummy);
+}
+
+SEC("tracepoint/syscalls/sys_enter_kill")
+int kill_entry_with_tcomm(struct syscall_trace_enter *ctx)
+{
+	pid_t tpid = (pid_t)ctx->args[0];
+	int sig = (int)ctx->args[1];
+
+	return probe_entry(tpid, sig, get_tcomm);
 }
 
 SEC("tracepoint/syscalls/sys_exit_kill")
@@ -98,7 +127,16 @@ int tkill_entry(struct syscall_trace_enter *ctx)
 	pid_t tpid = (pid_t)ctx->args[0];
 	int sig = (int)ctx->args[1];
 
-	return probe_entry(tpid, sig);
+	return probe_entry(tpid, sig, get_tcomm_dummy);
+}
+
+SEC("tracepoint/syscalls/sys_enter_tkill")
+int tkill_entry_with_tcomm(struct syscall_trace_enter *ctx)
+{
+	pid_t tpid = (pid_t)ctx->args[0];
+	int sig = (int)ctx->args[1];
+
+	return probe_entry(tpid, sig, get_tcomm);
 }
 
 SEC("tracepoint/syscalls/sys_exit_tkill")
@@ -113,7 +151,16 @@ int tgkill_entry(struct syscall_trace_enter *ctx)
 	pid_t tpid = (pid_t)ctx->args[1];
 	int sig = (int)ctx->args[2];
 
-	return probe_entry(tpid, sig);
+	return probe_entry(tpid, sig, get_tcomm_dummy);
+}
+
+SEC("tracepoint/syscalls/sys_enter_tgkill")
+int tgkill_entry_with_tcomm(struct syscall_trace_enter *ctx)
+{
+	pid_t tpid = (pid_t)ctx->args[1];
+	int sig = (int)ctx->args[2];
+
+	return probe_entry(tpid, sig, get_tcomm);
 }
 
 SEC("tracepoint/syscalls/sys_exit_tgkill")
@@ -122,8 +169,8 @@ int tgkill_exit(struct syscall_trace_exit *ctx)
 	return probe_exit(ctx, ctx->ret);
 }
 
-SEC("tracepoint/signal/signal_generate")
-int sig_trace(struct trace_event_raw_signal_generate *ctx)
+static __always_inline int __sig_trace(struct trace_event_raw_signal_generate *ctx,
+				       void (*tcomm_fn)(pid_t, char*, __u32))
 {
 	struct event event = {};
 	pid_t tpid = ctx->pid;
@@ -142,6 +189,8 @@ int sig_trace(struct trace_event_raw_signal_generate *ctx)
 	if (filtered_pid && pid != filtered_pid)
 		return 0;
 
+	tcomm_fn(tpid, event.tcomm, sizeof(event.tcomm));
+
 	event.pid = pid;
 	event.tpid = tpid;
 	event.sig = sig;
@@ -149,6 +198,18 @@ int sig_trace(struct trace_event_raw_signal_generate *ctx)
 	bpf_get_current_comm(event.comm, sizeof(event.comm));
 	bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &event, sizeof(event));
 	return 0;
+}
+
+SEC("tracepoint/signal/signal_generate")
+int sig_trace(struct trace_event_raw_signal_generate *ctx)
+{
+	return __sig_trace(ctx, get_tcomm_dummy);
+}
+
+SEC("tracepoint/signal/signal_generate")
+int sig_trace_with_tcomm(struct trace_event_raw_signal_generate *ctx)
+{
+	return __sig_trace(ctx, get_tcomm);
 }
 
 char LICENSE[] SEC("license") = "Dual BSD/GPL";
