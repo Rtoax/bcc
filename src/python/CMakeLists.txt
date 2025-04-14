@@ -30,7 +30,7 @@ foreach(PY_CMD ${PYTHON_CMD})
   set(PIP_INSTALLABLE "${PY_DIRECTORY}/dist/bcc-${REVISION}.tar.gz")
   add_custom_command(
     OUTPUT ${PIP_INSTALLABLE}
-    COMMAND ${PY_CMD} setup.py sdist
+    COMMAND ${PY_CMD} -m build --sdist ${PY_DIRECTORY}
     WORKING_DIRECTORY ${PY_DIRECTORY}
     DEPENDS ${PYTHON_SOURCES} ${PYTHON_INCLUDES}
     COMMENT "Building sdist for ${PY_CMD}"
@@ -45,6 +45,9 @@ foreach(PY_CMD ${PYTHON_CMD})
     CODE "
       execute_process(
         COMMAND ${PY_CMD} setup.py install -f ${PYTHON_FLAGS} --prefix=${PYTHON_PREFIX} --record ${CMAKE_BINARY_DIR}/install_manifest_python_bcc.txt
+        #COMMAND ${PY_CMD} -m installer --prefix=${PYTHON_PREFIX} ${PIP_INSTALLABLE}
+        #--record ${CMAKE_BINARY_DIR}/install_manifest_python_bcc.txt
         WORKING_DIRECTORY ${PY_DIRECTORY})"
+    COMMENT "Install ${PIP_INSTALLABLE} for ${PY_CMD}"
     COMPONENT python)
 endforeach()
