@@ -134,6 +134,16 @@ int trace_exit(struct syscall_trace_exit* ctx)
 	event.uid = bpf_get_current_uid_gid();
 	bpf_get_current_comm(&event.comm, sizeof(event.comm));
 	bpf_probe_read_user_str(&event.fname, sizeof(event.fname), ap->fname);
+	if (event.fname[0] != '/') {
+		struct task_struct *curtask = (void *)bpf_get_current_task();
+		struct fs_struct *fs;
+		bpf_probe_read_kernel(&fs, sizeof(fs), &curtask->fs);
+		if (curtask && fs) {
+			struct path pwd;
+			bpf_probe_read_kernel(&pwd, sizeof(pwd), &fs->pwd);
+			bpf_d_path(&pwd, event.cwd, sizeof(event.cwd));
+		}
+	}
 	event.flags = ap->flags;
 
 	if (ap->flags & O_CREAT || (ap->flags & O_TMPFILE) == O_TMPFILE)

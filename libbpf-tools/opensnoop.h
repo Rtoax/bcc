@@ -22,6 +22,8 @@ struct event {
 	__u32 mode;
 	__u64 callers[2];
 	char comm[TASK_COMM_LEN];
+	/* for fname[0] != '/' */
+	char cwd[128];
 	char fname[NAME_MAX];
 };
 
