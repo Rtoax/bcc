@@ -8,6 +8,7 @@
 #define _GNU_SOURCE
 #endif
 #include <argp.h>
+#include <assert.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
@@ -38,6 +39,7 @@
 #define NSEC_PER_SEC		1000000000ULL
 
 static volatile sig_atomic_t exiting = 0;
+static struct bpf_map *map_data_heap = NULL;
 
 #ifdef USE_BLAZESYM
 static blazesym *symbolizer;
@@ -57,6 +59,7 @@ static struct env {
 #ifdef USE_BLAZESYM
 	bool callers;
 #endif
+	bool full_path;
 } env = {
 	.uid = INVALID_UID
 };
@@ -88,6 +91,7 @@ const char argp_program_doc[] =
 #ifdef USE_BLAZESYM
 "    ./opensnoop -c        # show calling functions\n"
 #endif
+"    ./opensnoop -F        # show full path for an open file\n"
 "";
 
 static const struct argp_option opts[] = {
@@ -105,6 +109,7 @@ static const struct argp_option opts[] = {
 #ifdef USE_BLAZESYM
 	{ "callers", 'c', NULL, 0, "Show calling functions", 0 },
 #endif
+	{ "full-path", 'F', NULL, 0, "Show full path", 0 },
 	{},
 };
 
@@ -177,6 +182,9 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
 		env.callers = true;
 		break;
 #endif
+	case 'F':
+		env.full_path = true;
+		break;
 	case ARGP_KEY_ARG:
 		if (pos_args++) {
 			fprintf(stderr,
@@ -203,9 +211,26 @@ static void sig_int(int signo)
 	exiting = 1;
 }
 
-void handle_event(void *ctx, int cpu, void *data, __u32 data_sz)
+void handle_data_alloc(pid_t pid)
 {
-	struct event e;
+	int err;
+	struct data *data;
+
+	data = malloc(sizeof(struct data));
+	assert(data && "Malloc data failed, OOM?");
+
+	memset(data, 0, sizeof(0));
+
+	err = bpf_map__update_elem(map_data_heap, &pid, sizeof(pid),
+				   data, sizeof(struct data), 0);
+	if (err < 0)
+		printf("Error: alloc data for pid %d failed.\n", pid);
+	free(data);
+}
+
+void handle_data_submit(pid_t pid)
+{
+	struct data data;
 	struct tm *tm;
 #ifdef USE_BLAZESYM
 	const blazesym_result *result = NULL;
@@ -217,35 +242,35 @@ void handle_event(void *ctx, int cpu, void *data, __u32 data_sz)
 	time_t t;
 	int fd, err;
 
-	if (data_sz < sizeof(e)) {
-		printf("Error: packet too small\n");
+	err = bpf_map__lookup_elem(map_data_heap, &pid, sizeof(pid), &data,
+			    sizeof(struct data), 0);
+	if (err < 0) {
+		printf("Error: not found data for pid %d\n", pid);
 		return;
 	}
-	/* Copy data as alignment in the perf buffer isn't guaranteed. */
-	memcpy(&e, data, sizeof(e));
 
 	/* name filtering is currently done in user space */
-	if (env.name && strstr(e.comm, env.name) == NULL)
+	if (env.name && strstr(data.comm, env.name) == NULL)
 		return;
 
 	/* prepare fields */
 	time(&t);
 	tm = localtime(&t);
 	strftime(ts, sizeof(ts), "%H:%M:%S", tm);
-	if (e.ret >= 0) {
-		fd = e.ret;
+	if (data.ret >= 0) {
+		fd = data.ret;
 		err = 0;
 	} else {
 		fd = -1;
-		err = - e.ret;
+		err = - data.ret;
 	}
 
 #ifdef USE_BLAZESYM
 	sym_src_cfg cfgs[] = {
-		{ .src_type = SRC_T_PROCESS, .params = { .process = { .pid = e.pid }}},
+		{ .src_type = SRC_T_PROCESS, .params = { .process = { .pid = data.pid }}},
 	};
 	if (env.callers)
-		result = blazesym_symbolize(symbolizer, cfgs, 1, (const uint64_t *)&e.callers, 2);
+		result = blazesym_symbolize(symbolizer, cfgs, 1, (const uint64_t *)&data.callers, 2);
 #endif
 
 	/* print output */
@@ -255,20 +280,20 @@ void handle_event(void *ctx, int cpu, void *data, __u32 data_sz)
 		sps_cnt += 9;
 	}
 	if (env.print_uid) {
-		printf("%-7d ", e.uid);
+		printf("%-7d ", data.uid);
 		sps_cnt += 8;
 	}
-	printf("%-6d %-16s %3d %3d ", e.pid, e.comm, fd, err);
+	printf("%-6d %-16s %3d %3d ", data.pid, data.comm, fd, err);
 	sps_cnt += 7 + 17 + 4 + 4;
 	if (env.extended) {
-		if (e.mode == 0 && (e.flags & O_CREAT) == 0 &&
-		    (e.flags & O_TMPFILE) != O_TMPFILE)
-			printf("%08o n/a  ", e.flags);
+		if (data.mode == 0 && (data.flags & O_CREAT) == 0 &&
+		    (data.flags & O_TMPFILE) != O_TMPFILE)
+			printf("%08o n/a  ", data.flags);
 		else
-			printf("%08o %04o ", e.flags, e.mode);
+			printf("%08o %04o ", data.flags, data.mode);
 		sps_cnt += 9;
 	}
-	printf("%s\n", e.fname);
+	printf("%s\n", data.fname);
 
 #ifdef USE_BLAZESYM
 	for (i = 0; result && i < result->size; i++) {
@@ -286,6 +311,28 @@ void handle_event(void *ctx, int cpu, void *data, __u32 data_sz)
 
 	blazesym_result_free(result);
 #endif
+	bpf_map__delete_elem(map_data_heap, &pid, sizeof(pid), 0);
+}
+
+void handle_event(void *ctx, int cpu, void *data, __u32 data_sz)
+{
+	struct event e;
+	if (data_sz < sizeof(struct event)) {
+		printf("Error: packet too small\n");
+		return;
+	}
+
+	/* Copy data as alignment in the perf buffer isn't guaranteed. */
+	memcpy(&e, data, sizeof(e));
+
+	switch (e.type) {
+	case DATA_ALLOC:
+		handle_data_alloc(e.pid);
+		break;
+	case DATA_SUBMIT:
+		handle_data_submit(e.pid);
+		break;
+	}
 }
 
 void handle_lost_events(void *ctx, int cpu, __u64 lost_cnt)
@@ -329,6 +376,7 @@ int main(int argc, char **argv)
 	obj->rodata->targ_pid = env.tid;
 	obj->rodata->targ_uid = env.uid;
 	obj->rodata->targ_failed = env.failed;
+	obj->rodata->full_path = env.full_path;
 
 	/* aarch64 and riscv64 don't have open syscall */
 	if (!tracepoint_exists("syscalls", "sys_enter_open")) {
@@ -350,6 +398,8 @@ int main(int argc, char **argv)
 		fprintf(stderr, "failed to load BPF object: %d\n", err);
 		goto cleanup;
 	}
+
+	map_data_heap = obj->maps.data_heap;
 
 	err = opensnoop_bpf__attach(obj);
 	if (err) {

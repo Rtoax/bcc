@@ -6,13 +6,17 @@
 #define NAME_MAX 255
 #define INVALID_UID ((uid_t)-1)
 
-struct args_t {
-	const char *fname;
-	int flags;
-	__u32 mode;
-};
+#define MAX_PATH_DEPTH 32
 
 struct event {
+	pid_t pid;
+	enum {
+		DATA_ALLOC,
+		DATA_SUBMIT,
+	} type;
+};
+
+struct data {
 	/* user terminology for pid: */
 	__u64 ts;
 	pid_t pid;
@@ -22,7 +26,7 @@ struct event {
 	__u32 mode;
 	__u64 callers[2];
 	char comm[TASK_COMM_LEN];
-	char fname[NAME_MAX];
+	char fname[NAME_MAX * MAX_PATH_DEPTH];
 };
 
 #endif /* __OPENSNOOP_H */

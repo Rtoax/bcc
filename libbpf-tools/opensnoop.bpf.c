@@ -2,6 +2,7 @@
 // Copyright (c) 2019 Facebook
 // Copyright (c) 2020 Netflix
 #include <vmlinux.h>
+#include <bpf/bpf_core_read.h>
 #include <bpf/bpf_helpers.h>
 #include "opensnoop.h"
 
@@ -12,10 +13,17 @@
 #define O_TMPFILE	020200000
 #endif
 
+struct args_t {
+	const char *fname;
+	int flags;
+	__u32 mode;
+};
+
 const volatile pid_t targ_pid = 0;
 const volatile pid_t targ_tgid = 0;
 const volatile uid_t targ_uid = 0;
 const volatile bool targ_failed = false;
+const volatile bool full_path = false;
 
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
@@ -23,6 +31,13 @@ struct {
 	__type(key, u32);
 	__type(value, struct args_t);
 } start SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 10240);
+	__type(key, u32);
+	__type(value, struct data);
+} data_heap SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
@@ -53,6 +68,15 @@ bool trace_allowed(u32 tgid, u32 pid)
 	return true;
 }
 
+static __always_inline
+void submit_event(void *ctx, u32 pid, u32 type)
+{
+	struct event event = { .pid = pid, .type = type };
+	bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU,
+			      &event, sizeof(event));
+
+}
+
 SEC("tracepoint/syscalls/sys_enter_open")
 int tracepoint__syscalls__sys_enter_open(struct syscall_trace_enter* ctx)
 {
@@ -68,6 +92,7 @@ int tracepoint__syscalls__sys_enter_open(struct syscall_trace_enter* ctx)
 		args.flags = (int)ctx->args[1];
 		args.mode = (__u32)ctx->args[2];
 		bpf_map_update_elem(&start, &pid, &args, 0);
+		submit_event(ctx, pid, DATA_ALLOC);
 	}
 	return 0;
 }
@@ -87,6 +112,7 @@ int tracepoint__syscalls__sys_enter_openat(struct syscall_trace_enter* ctx)
 		args.flags = (int)ctx->args[2];
 		args.mode = (__u32)ctx->args[3];
 		bpf_map_update_elem(&start, &pid, &args, 0);
+		submit_event(ctx, pid, DATA_ALLOC);
 	}
 	return 0;
 }
@@ -108,6 +134,7 @@ int tracepoint__syscalls__sys_enter_openat2(struct syscall_trace_enter* ctx)
 		args.flags = (int)how.flags;
 		args.mode = (__u32)how.mode;
 		bpf_map_update_elem(&start, &pid, &args, 0);
+		submit_event(ctx, pid, DATA_ALLOC);
 	}
 	return 0;
 }
@@ -116,7 +143,7 @@ int tracepoint__syscalls__sys_enter_openat2(struct syscall_trace_enter* ctx)
 static __always_inline
 int trace_exit(struct syscall_trace_exit* ctx)
 {
-	struct event event = {};
+	struct data *data;
 	struct args_t *ap;
 	uintptr_t stack[3];
 	int ret;
@@ -125,33 +152,65 @@ int trace_exit(struct syscall_trace_exit* ctx)
 	ap = bpf_map_lookup_elem(&start, &pid);
 	if (!ap)
 		return 0;	/* missed entry */
+
+	data = bpf_map_lookup_elem(&data_heap, &pid);
+	if (!data)
+		return 0;	/* missed entry */
+
 	ret = ctx->ret;
 	if (targ_failed && ret >= 0)
 		goto cleanup;	/* want failed only */
 
-	/* event data */
-	event.pid = bpf_get_current_pid_tgid() >> 32;
-	event.uid = bpf_get_current_uid_gid();
-	bpf_get_current_comm(&event.comm, sizeof(event.comm));
-	bpf_probe_read_user_str(&event.fname, sizeof(event.fname), ap->fname);
-	event.flags = ap->flags;
+	/* data */
+	data->pid = bpf_get_current_pid_tgid() >> 32;
+	data->uid = bpf_get_current_uid_gid();
+	bpf_get_current_comm(&data->comm, sizeof(data->comm));
+	data->flags = ap->flags;
 
 	if (ap->flags & O_CREAT || (ap->flags & O_TMPFILE) == O_TMPFILE)
-		event.mode = ap->mode;
+		data->mode = ap->mode;
 	else
-		event.mode = 0;
+		data->mode = 0;
 
-	event.ret = ret;
+	data->ret = ret;
 
 	bpf_get_stack(ctx, &stack, sizeof(stack),
 		      BPF_F_USER_STACK);
 	/* Skip the first address that is usually the syscall it-self */
-	event.callers[0] = stack[1];
-	event.callers[1] = stack[2];
+	data->callers[0] = stack[1];
+	data->callers[1] = stack[2];
 
-	/* emit event */
-	bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU,
-			      &event, sizeof(event));
+	if (full_path && data->fname[0] != '/') {
+		struct task_struct *task;
+		struct dentry *dentry, *parent_dentry;
+		size_t filepart_length;
+		void *payload = data->fname;
+
+		task = (struct task_struct *)bpf_get_current_task_btf();
+		dentry = BPF_CORE_READ(task, fs, pwd.dentry);
+
+		for (int i = 0; i < MAX_PATH_DEPTH; i++) {
+			filepart_length =
+				bpf_probe_read_kernel_str(payload, NAME_MAX,
+						BPF_CORE_READ(dentry, d_name.name));
+
+			parent_dentry = BPF_CORE_READ(dentry, d_parent);
+			if (dentry == parent_dentry)
+				break;
+
+			if (filepart_length > NAME_MAX)
+				break;
+
+			payload += filepart_length;
+
+			dentry = parent_dentry;
+		}
+	} else
+		bpf_probe_read_user_str(&data->fname, sizeof(data->fname),
+			  ap->fname);
+
+	/* emit data */
+	submit_event(ctx, pid, DATA_SUBMIT);
 
 cleanup:
 	bpf_map_delete_elem(&start, &pid);
